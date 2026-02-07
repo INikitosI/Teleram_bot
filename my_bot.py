@@ -4,68 +4,58 @@ import logging
 import asyncio
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
-from http.server import BaseHTTPRequestHandler
-from socketserver import TCPServer
-from threading import Thread
+from aiohttp import web
 
+# Логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# === Telegram Bot Handlers ===
-
+# === Telegram Bot ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        ["Кнопка 1", "Кнопка 2"],
-        ["Кнопка 3", "Кнопка 4"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True,
-        input_field_placeholder="Выберите кнопку — она появится в поле ввода"
-    )
-    await update.message.reply_text(
-        "Нажмите любую кнопку — её текст автоматически появится в поле ввода!",
-        reply_markup=reply_markup
-    )
+    keyboard = [["Кнопка 1", "Кнопка 2"], ["Кнопка 3", "Кнопка 4"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("Выберите кнопку — она появится в поле ввода!", reply_markup=reply_markup)
 
-# === Фейковый HTTP-сервер (синхронный, но запущенный в отдельном потоке) ===
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        return  # подавляем логи
-
-def start_http_server(port: int):
-    with TCPServer(("", port), HealthCheckHandler) as httpd:
-        logger.info(f"Фейковый HTTP-сервер запущен на порту {port}")
-        httpd.serve_forever()
-
-# === Основная асинхронная логика ===
+# === HTTP Health Check для Render ===
+async def health_check(request):
+    return web.Response(text="OK")
 
 async def main():
+    # Получаем токен
     token = os.getenv("BOT_TOKEN")
     if not token:
-        raise ValueError("Переменная окружения BOT_TOKEN не установлена!")
+        raise ValueError("BOT_TOKEN не задан!")
 
-    # Запуск HTTP-сервера в отдельном потоке (он синхронный, но легковесный)
-    port = int(os.environ.get("PORT", 10000))
-    http_thread = Thread(target=start_http_server, args=(port,), daemon=True)
-    http_thread.start()
+    # Создаём приложение Telegram
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", start))
 
-    # Инициализация и запуск Telegram-бота
-    application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler("start", start))
+    # Запускаем бота в фоне
+    bot_task = asyncio.create_task(app.run_polling(drop_pending_updates=True))
+    logger.info("Telegram-бот запущен в фоне.")
 
-    logger.info("Запуск Telegram-бота в режиме polling...")
-    await application.run_polling(drop_pending_updates=True)
+    # Настраиваем HTTP-сервер для Render
+    http_app = web.Application()
+    http_app.router.add_get('/{tail:.*}', health_check)  # ловим все GET-запросы
+
+    port = int(os.getenv("PORT", 10000))
+    runner = web.AppRunner(http_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на порту {port} для Render.")
+
+    # Ждём завершения (бесконечно)
+    try:
+        await bot_task
+    except asyncio.CancelledError:
+        logger.info("Бот остановлен.")
+    finally:
+        await app.stop()
+        await runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
