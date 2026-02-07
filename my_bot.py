@@ -1,22 +1,22 @@
 # my_bot.py
 import os
 import logging
-from threading import Thread
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
+from http.server import BaseHTTPRequestHandler
+from socketserver import TCPServer
+from threading import Thread
 
-# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# === Telegram Bot Logic ===
+# === Telegram Bot Handlers ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет клавиатуру с кнопками при команде /start"""
     keyboard = [
         ["Кнопка 1", "Кнопка 2"],
         ["Кнопка 3", "Кнопка 4"]
@@ -31,47 +31,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-def main():
-    # Получаем токен из переменной окружения (на Render задаётся вручную)
-    TOKEN = os.getenv("BOT_TOKEN")
-    if not TOKEN:
-        raise ValueError("Переменная окружения TELEGRAM_BOT_TOKEN не установлена!")
+# === Фейковый HTTP-сервер (синхронный, но запущенный в отдельном потоке) ===
 
-    # Инициализация бота
-    application = Application.builder().token(TOKEN).build()
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-    # Обработчик команды /start
+    def log_message(self, format, *args):
+        return  # подавляем логи
+
+def start_http_server(port: int):
+    with TCPServer(("", port), HealthCheckHandler) as httpd:
+        logger.info(f"Фейковый HTTP-сервер запущен на порту {port}")
+        httpd.serve_forever()
+
+# === Основная асинхронная логика ===
+
+async def main():
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise ValueError("Переменная окружения BOT_TOKEN не установлена!")
+
+    # Запуск HTTP-сервера в отдельном потоке (он синхронный, но легковесный)
+    port = int(os.environ.get("PORT", 10000))
+    http_thread = Thread(target=start_http_server, args=(port,), daemon=True)
+    http_thread.start()
+
+    # Инициализация и запуск Telegram-бота
+    application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", start))
 
-    # Запуск polling в отдельном потоке
-    def run_bot():
-        logger.info("Запуск Telegram-бота...")
-        application.run_polling(drop_pending_updates=True)
-
-    bot_thread = Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
-    # === Фейковый HTTP-сервер для Render ===
-    class HealthCheckHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, format, *args):
-            # Отключаем логирование запросов health-check'а
-            return
-
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("", port), HealthCheckHandler)
-    logger.info(f"Фейковый HTTP-сервер запущен на порту {port} для Render")
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        logger.info("Сервер остановлен.")
-        server.shutdown()
+    logger.info("Запуск Telegram-бота в режиме polling...")
+    await application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
