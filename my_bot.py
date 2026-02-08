@@ -1,9 +1,10 @@
 import os
 import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 import asyncio
-from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # Настройка логирования
 logging.basicConfig(
@@ -13,143 +14,61 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Получаем токен из переменных окружения
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
+TOKEN = os.getenv('BOT_TOKEN')
+if not TOKEN:
+    logger.error("BOT_TOKEN не установлен!")
+    raise ValueError("Установите переменную окружения BOT_TOKEN")
 
-# Создаем Flask приложение для Render
-app = Flask(__name__)
+# Простой HTTP-сервер для поддержания активности на Render
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b'Bot is alive!')
+    
+    def log_message(self, format, *args):
+        pass  # Отключаем логирование запросов
 
-@app.route('/')
-def home():
-    return "Telegram Bot is running!"
+def run_health_server():
+    """Запуск HTTP-сервера на порту 10000"""
+    port = 10000
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    logger.info(f"Health server started on port {port}")
+    server.serve_forever()
 
-@app.route('/health')
-def health():
-    return "OK", 200
-
-# Кнопки с текстом для вставки
-BUTTONS = [
-    ["❗ Важно", "📢 Объявление", "❓ Вопрос"],
-    ["✅ Решено", "🚀 Срочно", "⚠️ Проблема"],
-    ["📝 Заметка", "💡 Идея", "🔧 Техническое"]
-]
-
-# Обработчик команды /start
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработчики команд бота
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
     user = update.effective_user
-    keyboard = []
-    
-    # Создаем кнопки
-    for row in BUTTONS:
-        keyboard_row = []
-        for button_text in row:
-            keyboard_row.append(InlineKeyboardButton(button_text, callback_data=button_text))
-        keyboard.append(keyboard_row)
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"Привет, {user.first_name}!\n\n"
-        "Нажми на кнопку, чтобы вставить текст в начало сообщения.\n"
-        "Затем просто начни печатать своё сообщение.",
-        reply_markup=reply_markup
+    await update.message.reply_html(
+        f"Привет, {user.mention_html()}! 👋\n"
+        f"Я простой бот, работающий на Render.\n"
+        f"Мой ID: {update.effective_chat.id}"
     )
 
-# Обработчик нажатия кнопок
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    # Сохраняем выбранный текст в контексте пользователя
-    selected_text = query.data
-    context.user_data['prefix'] = selected_text
-    
-    # Обновляем сообщение
-    await query.edit_message_text(
-        text=f"✅ Выбрано: {selected_text}\n\n"
-             "Теперь напишите ваше сообщение, и текст кнопки автоматически добавится в начало.",
-        reply_markup=query.message.reply_markup
-    )
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    await update.message.reply_text("Доступные команды:\n/start - Начать общение\n/help - Помощь")
 
-# Обработчик текстовых сообщений
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
+def main():
+    """Основная функция запуска бота"""
+    logger.info("Starting bot...")
     
-    # Проверяем, есть ли сохраненный префикс
-    if 'prefix' in context.user_data:
-        prefix = context.user_data['prefix']
-        
-        # Формируем сообщение с префиксом
-        formatted_message = f"{prefix}: {user_message}"
-        
-        # Отправляем отформатированное сообщение
-        await update.message.reply_text(formatted_message)
-        
-        # Очищаем префикс после использования
-        del context.user_data['prefix']
-        
-        # Показываем клавиатуру снова
-        keyboard = []
-        for row in BUTTONS:
-            keyboard_row = []
-            for button_text in row:
-                keyboard_row.append(InlineKeyboardButton(button_text, callback_data=button_text))
-            keyboard.append(keyboard_row)
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "Выберите следующую кнопку или напишите сообщение:",
-            reply_markup=reply_markup
-        )
-    else:
-        # Если префикса нет, показываем кнопки
-        keyboard = []
-        for row in BUTTONS:
-            keyboard_row = []
-            for button_text in row:
-                keyboard_row.append(InlineKeyboardButton(button_text, callback_data=button_text))
-            keyboard.append(keyboard_row)
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "Сначала выберите кнопку для добавления префикса:",
-            reply_markup=reply_markup
-        )
-
-# Обработчик ошибок
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Ошибка: {context.error}")
-
-# Функция для запуска Flask сервера
-def run_flask():
-    app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False)
-
-# Основная функция для запуска бота
-async def run_bot():
-    # Создаем приложение
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Запускаем HTTP-сервер в отдельном потоке
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
     
-    # Регистрируем обработчики
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
+    # Создаем приложение бота
+    application = Application.builder().token(TOKEN).build()
+    
+    # Регистрируем обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     
     # Запускаем бота
-    logger.info("Бот запускается...")
-    await application.run_polling(drop_pending_updates=True)
-
-# Главная функция
-def main():
-    import threading
-    
-    # Запускаем Flask сервер в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Запускаем бота в основном потоке
-    asyncio.run(run_bot())
+    logger.info("Bot started successfully!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
