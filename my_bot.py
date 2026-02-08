@@ -1,6 +1,7 @@
 import os
 import logging
-from flask import Flask, request
+import asyncio
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
@@ -23,9 +24,9 @@ app = Flask(__name__)
 def home():
     return "Telegram Bot is running!"
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    return "OK"
+@app.route('/health')
+def health():
+    return "OK", 200
 
 # Кнопки с текстом для вставки
 BUTTONS = [
@@ -35,7 +36,7 @@ BUTTONS = [
 ]
 
 # Обработчик команды /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     keyboard = []
     
@@ -56,7 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # Обработчик нажатия кнопок
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -64,7 +65,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     selected_text = query.data
     context.user_data['prefix'] = selected_text
     
-    # Отправляем сообщение с инструкцией
+    # Обновляем сообщение
     await query.edit_message_text(
         text=f"✅ Выбрано: {selected_text}\n\n"
              "Теперь напишите ваше сообщение, и текст кнопки автоматически добавится в начало.",
@@ -120,31 +121,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Ошибка: {context.error}")
 
-# Основная функция
-def main():
+# Функция для запуска Flask сервера
+def run_flask():
+    app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False)
+
+# Основная функция для запуска бота
+async def run_bot():
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     
     # Запускаем бота
     logger.info("Бот запускается...")
-    application.run_polling(drop_pending_updates=True)
+    await application.run_polling(drop_pending_updates=True)
 
-if __name__ == '__main__':
-    # Импортируем здесь, чтобы избежать циклических импортов
+# Главная функция
+def main():
     import threading
     
     # Запускаем Flask сервер в отдельном потоке
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False)
-    )
-    flask_thread.daemon = True
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Запускаем бота
+    # Запускаем бота в основном потоке
+    asyncio.run(run_bot())
+
+if __name__ == '__main__':
     main()
